@@ -1,5 +1,5 @@
 [project]
-name = "agentic-ai-research-platform"
+name = "multi-agent-research-platform"
 version = "0.2.0"
 description = "Real-time multi-agent web research and reporting platform"
 readme = "README.md"
