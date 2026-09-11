@@ -1,83 +1,44 @@
 # Autonomous Multi-Agent Research Platform
 
-This project is a real-time research and reporting service. Each request can use live Tavily, Wikipedia, and Firecrawl evidence, then passes that evidence through a LangGraph workflow:
-
-```text
-FastAPI → Redis Stream → LangGraph plan → live search tools
-                         ↓
-             structured evidence and citations
-                         ↓
-              Summarizer → Writer → Critic
-                         ↓
-                 bounded revision loop
-                         ↓
-                  text / JSON / PDF report
-```
+This project is a real-time research and reporting service. It accepts questions through FastAPI, processes them in the background with a worker and LangGraph, gathers live evidence from search tools, and returns cited text, JSON, or PDF reports.
 
 PostgreSQL stores ordinary report records, metadata, citations, and audit history. Redis stores jobs, short-term sessions, status, and an optional exact-query cache. The research workflow does not use embeddings, pgvector, or vector retrieval.
 
 ## Architecture
 
-### Runtime topology
+The platform takes a research question, gathers information from trusted sources, creates a cited report, and returns it to the user.
 
 ```mermaid
-flowchart LR
-    Client["Browser / API client"] --> UI["React + Vite UI<br/>frontend/"]
-    Client --> API["FastAPI API<br/>app/main.py"]
-    UI --> API
+flowchart TD
+    A[User Query] --> B[React Frontend]
+    B --> C[FastAPI API]
+    C --> D{Validate Request}
+    D -->|Rejected| E[Return Error]
+    D -->|Accepted| F[Redis Job Queue]
+    F --> G[Research Worker]
+    G --> H[LangGraph Research Workflow]
 
-    API -->|"auth, rate limit,<br/>input guardrail, enqueue"| Redis["Redis 7<br/>streams, status, sessions, cache"]
-    Worker["Worker service<br/>app/worker.py"] -->|"consume jobs"| Redis
-    Worker --> Graph["LangGraph workflow<br/>app/agents.py"]
+    H --> I[Search and Collect Evidence]
+    I --> I1[Tavily]
+    I --> I2[Wikipedia]
+    I --> I3[Firecrawl]
 
-    Graph --> Tools["Research tools<br/>app/tools.py"]
-    Tools --> Tavily["Tavily"]
-    Tools --> Wikipedia["Wikipedia"]
-    Tools --> Firecrawl["Firecrawl<br/>allowlisted domains"]
+    I1 --> J[Summarize Evidence]
+    I2 --> J
+    I3 --> J
+    J --> K[Write and Critique Report]
+    K --> L[Text, JSON, or PDF Report]
+    K --> M[PostgreSQL Report History]
+    L --> N[Redis Result]
+    N --> C
+    C --> B
 
-    Graph --> TensorZero["TensorZero gateway<br/>tensorzero/"]
-    TensorZero --> Gemini["Gemini"]
-    TensorZero --> Groq["Groq fallback"]
-
-    API --> InputSafety["Optional AWS Bedrock<br/>input guardrail"]
-    Worker --> OutputSafety["Optional AWS Bedrock<br/>output guardrail"]
-    Worker --> PostgreSQL["PostgreSQL<br/>reports, citations, audit history"]
-    Worker --> Output["Text / JSON / PDF<br/>app/output.py"]
-    Worker -->|"done, retry, error,<br/>or dead letter"| Redis
-    Redis -->|"poll result / session"| API
-
-    PyRIT["PyRIT dashboard<br/>pyrit_dashboard/"] -->|"red-team research requests"| API
-    PyRIT -->|"store attack results"| Redis
+    H --> O[TensorZero]
+    O --> O1[Gemini]
+    O --> O2[Groq Fallback]
 ```
 
-The API and worker are separate processes so HTTP traffic can scale independently from research jobs. Docker Compose runs them as separate services; the API can also start an in-process worker for local or backward-compatible deployments.
-
-### Request lifecycle
-
-1. A browser or API client submits `POST /research` with a topic and optional session/output format.
-2. FastAPI authenticates the request, applies rate limiting and input guardrails, records the user message, and pushes a job to a Redis Stream.
-3. The worker claims the job, recovers abandoned jobs when needed, and runs the LangGraph workflow.
-4. The research agents plan the work, collect evidence from Tavily, Wikipedia, and optionally allowlisted Firecrawl pages, then summarize the evidence and write a cited report.
-5. The critic checks the draft. Failed checks enter a bounded revision loop; exhausted retries go to the Redis dead-letter stream.
-6. The worker applies output guardrails, stores report metadata and citations in PostgreSQL, stores status/results in Redis, and optionally creates JSON or PDF output.
-7. The client polls `GET /result/{job_id}`. The API reads the result from Redis and returns the completed report, citations, diff, and requested output.
-
-### Service responsibilities
-
-| Service or area | Responsibility | Main location |
-|---|---|---|
-| Frontend | React/Vite chat interface; production assets are built into the API image | `frontend/` |
-| API | Authentication, sessions, rate limiting, job submission, result endpoints, and static frontend serving | `app/main.py` |
-| Worker | Redis Stream consumption, retries, abandoned-job recovery, and report execution | `app/worker.py`, `app/queue.py` |
-| Research graph | Planning, search routing, summarization, writing, citations, and critic/revision loop | `app/agents.py` |
-| Tool layer | Tavily, Wikipedia, and bounded Firecrawl access with URL validation and rate limits | `app/tools.py` |
-| Redis | Job stream, job status, sessions, rate limits, optional exact-query cache, and PyRIT results | Docker Compose / AWS ElastiCache |
-| PostgreSQL | Ordinary report records, metadata, citations, and audit history; no vector database | `app/memory.py` |
-| TensorZero | LLM gateway and model routing for Gemini and Groq | `tensorzero/` |
-| PyRIT | Authenticated red-team dashboard and scheduled attack runner | `pyrit_dashboard/` |
-| Infrastructure | Local containers and AWS VPC, ECS, Redis, PostgreSQL, ECR, Secrets Manager, Bedrock, and EventBridge | `docker-compose.yml`, `terraform/` |
-
-The API image uses a multi-stage build: Vite creates `frontend/dist`, which is copied to `frontend-dist` and served by FastAPI. If no production build is present, FastAPI falls back to the root `index.html`.
+The API and worker run separately so user requests stay responsive while research is processed in the background. Redis stores jobs and results, PostgreSQL stores report history, and TensorZero routes requests to the configured language models.
 
 ## Components
 

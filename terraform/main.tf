@@ -22,7 +22,7 @@ provider "aws" {
   region = var.aws_region
 }
 
-# ─── Variables ───────────────────────────────────────────────────────────────
+# Variables
 
 variable "aws_region" {
   default = "us-east-1"
@@ -111,7 +111,7 @@ variable "acm_certificate_arn" {
   default     = ""
 }
 
-# ─── Data & Locals ────────────────────────────────────────────────────────────
+# Data and locals
 
 data "aws_availability_zones" "available" {}
 
@@ -120,7 +120,7 @@ locals {
   https_enabled = var.acm_certificate_arn != ""
 }
 
-# ─── VPC ──────────────────────────────────────────────────────────────────────
+# VPC
 
 resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
@@ -175,7 +175,7 @@ resource "aws_route_table_association" "private" {
   route_table_id = aws_route_table.private.id
 }
 
-# ─── VPC Endpoints (replaces NAT gateway) ────────────────────────────────────
+# VPC endpoints (replaces NAT gateway)
 
 resource "aws_vpc_endpoint" "ecr_dkr" {
   vpc_id              = aws_vpc.main.id
@@ -229,7 +229,7 @@ resource "aws_vpc_endpoint" "cloudwatch_logs" {
   private_dns_enabled = true
 }
 
-# ─── Security Groups ──────────────────────────────────────────────────────────
+# Security groups
 
 resource "aws_security_group" "vpc_endpoints" {
   name   = "${var.project}-vpc-endpoints"
@@ -307,7 +307,7 @@ resource "aws_security_group" "rds" {
   }
 }
 
-# ─── Bedrock Guardrail ────────────────────────────────────────────────────────
+# Bedrock guardrail
 
 resource "aws_bedrock_guardrail" "main" {
   name                      = "${var.project}-guardrail"
@@ -404,7 +404,7 @@ resource "aws_bedrock_guardrail_version" "main" {
   description   = "v1 — deployed by Terraform"
 }
 
-# ─── ElastiCache Redis ────────────────────────────────────────────────────────
+# ElastiCache Redis
 
 resource "aws_elasticache_subnet_group" "main" {
   name       = "${var.project}-redis-subnet"
@@ -423,7 +423,7 @@ resource "aws_elasticache_cluster" "redis" {
   security_group_ids   = [aws_security_group.redis.id]
 }
 
-# ─── RDS PostgreSQL ───────────────────────────────────────────────────────────
+# RDS PostgreSQL
 
 resource "aws_db_subnet_group" "main" {
   name       = "${var.project}-db-subnet"
@@ -457,7 +457,7 @@ resource "random_password" "db_password" {
   special = false
 }
 
-# ─── ALB ──────────────────────────────────────────────────────────────────────
+# Application load balancer
 
 resource "aws_lb" "main" {
   name               = "${var.project}-alb"
@@ -519,7 +519,7 @@ resource "aws_lb_listener" "https" {
   }
 }
 
-# ─── ECS ──────────────────────────────────────────────────────────────────────
+# ECS
 
 resource "aws_ecs_cluster" "main" {
   name = "${var.project}-cluster"
@@ -606,7 +606,7 @@ resource "aws_cloudwatch_log_group" "tensorzero" {
   retention_in_days = var.log_retention_days
 }
 
-# ─── Secrets Manager ─────────────────────────────────────────────────────────
+# Secrets Manager
 
 resource "aws_secretsmanager_secret" "config" {
   name = "research-agent/config"
@@ -675,7 +675,7 @@ resource "aws_secretsmanager_secret_version" "config" {
   })
 }
 
-# ─── ECS Task Definitions ─────────────────────────────────────────────────────
+# ECS task definitions
 
 resource "aws_ecs_task_definition" "app" {
   family                   = "${var.project}-app"
@@ -761,7 +761,7 @@ resource "aws_ecs_task_definition" "pyrit" {
   }])
 }
 
-# ─── ECS Services ─────────────────────────────────────────────────────────────
+# ECS services
 
 resource "aws_ecs_service" "app" {
   name            = "${var.project}-app"
@@ -797,7 +797,7 @@ resource "aws_ecs_service" "pyrit" {
   }
 }
 
-# ─── ECS Auto-Scaling ─────────────────────────────────────────────────────────
+# ECS auto-scaling
 
 resource "aws_appautoscaling_target" "app" {
   max_capacity       = var.app_max_capacity
@@ -823,7 +823,7 @@ resource "aws_appautoscaling_policy" "app_cpu" {
   }
 }
 
-# ─── ECR ──────────────────────────────────────────────────────────────────────
+# ECR
 
 resource "aws_ecr_repository" "app" {
   name                 = "${var.project}-app"
@@ -846,7 +846,7 @@ resource "aws_ecr_repository" "tensorzero" {
   image_scanning_configuration { scan_on_push = true }
 }
 
-# ─── EventBridge (weekly red team) ───────────────────────────────────────────
+# EventBridge (weekly red team)
 
 resource "aws_cloudwatch_event_rule" "weekly_redteam" {
   name                = "${var.project}-weekly-redteam"
@@ -910,7 +910,7 @@ resource "aws_iam_role_policy" "eventbridge_ecs_policy" {
   })
 }
 
-# ─── Outputs ──────────────────────────────────────────────────────────────────
+# Outputs
 
 output "alb_dns" {
   value = aws_lb.main.dns_name
