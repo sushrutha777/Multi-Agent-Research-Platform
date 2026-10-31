@@ -17,14 +17,9 @@ def config_stub(**overrides):
     values = {
         "tavily_api_key": "tavily",
         "wikipedia_enabled": True,
-        "firecrawl_api_key": "firecrawl",
-        "firecrawl_allowed_domains": ["example.com"],
-        "firecrawl_allowed_paths": [],
-        "firecrawl_max_pages": 3,
         "search_max_results": 5,
         "max_tool_calls": 8,
         "tool_timeout": 5,
-        "firecrawl_base_url": "https://api.firecrawl.dev",
         "agent_report_truncate": 3000,
         "agent_max_iterations": 2,
         "llm_max_retries": 1,
@@ -57,14 +52,9 @@ async def test_invalid_private_url_is_rejected(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_firecrawl_domain_allowlist_is_enforced(monkeypatch):
-    monkeypatch.setattr("app.tools._resolves_to_private_address", AsyncMock(return_value=False))
-    with pytest.raises(ToolError):
-        await validate_public_url(
-            "https://not-allowed.example.org/page",
-            config_stub(),
-            require_firecrawl_allowlist=True,
-        )
+async def test_valid_public_url_is_accepted():
+    url = await validate_public_url("https://en.wikipedia.org/wiki/Artificial_intelligence")
+    assert url == "https://en.wikipedia.org/wiki/Artificial_intelligence"
 
 
 def test_research_plan_json_parser_and_fallback():
@@ -100,7 +90,7 @@ async def test_mocked_langgraph_workflow_uses_tools_and_revises(monkeypatch):
 
     async def fake_llm(config, function_name, message):
         if "Create a research tool plan" in message:
-            return '{"tools":["tavily","wikipedia"],"queries":["question"],"urls":[],"firecrawl_after_search":false}'
+            return '{"tools":["tavily","wikipedia"],"queries":["question"]}'
         if "Summarize the supplied evidence" in message:
             return "Evidence summary [S1] [S2]"
         if "Critique this report" in message:

@@ -86,12 +86,7 @@ async def _resolves_to_private_address(hostname: str) -> bool:
     return any(_is_private_host(record[4][0]) for record in records)
 
 
-async def validate_public_url(
-    url: str,
-    config: Config,
-    *,
-    require_firecrawl_allowlist: bool = False,
-) -> str:
+async def validate_public_url(url: str, config: Config | None = None) -> str:
     if not url or len(url) > 2048:
         raise ToolError("URL is empty or too long")
     parsed = urlparse(url)
@@ -102,15 +97,6 @@ async def validate_public_url(
     hostname = parsed.hostname.casefold().rstrip(".")
     if _is_private_host(hostname) or await _resolves_to_private_address(hostname):
         raise ToolError("Private or internal network URLs are not allowed")
-    if require_firecrawl_allowlist:
-        if not config.firecrawl_allowed_domains:
-            raise ToolError("Firecrawl is disabled until FIRECRAWL_ALLOWED_DOMAINS is configured")
-        if not _domain_matches(hostname, config.firecrawl_allowed_domains):
-            raise ToolError(f"Domain is not in the Firecrawl allowlist: {hostname}")
-        if config.firecrawl_allowed_paths:
-            path = parsed.path or "/"
-            if not any(path == allowed or path.startswith(allowed.rstrip("/") + "/") for allowed in config.firecrawl_allowed_paths):
-                raise ToolError("URL path is not in the Firecrawl allowlist")
     return parsed.geturl()
 
 
@@ -215,53 +201,4 @@ async def wikipedia_search(config: Config, query: str) -> list[dict[str, Any]]:
             )
 
         fetched = await asyncio.gather(*(fetch_summary(match) for match in matches), return_exceptions=True)
-    return [item for item in fetched if isinstance(item, dict)]
-
-
-async def firecrawl_scrape(config: Config, urls: list[str]) -> list[dict[str, Any]]:
-    if not config.firecrawl_api_key:
-        raise ToolError("Firecrawl is not configured")
-    await _acquire_tool_slot(config, "firecrawl")
-    candidates: list[str] = []
-    for url in urls:
-        try:
-            validated = await validate_public_url(url, config, require_firecrawl_allowlist=True)
-        except ToolError as exc:
-            logger.warning("Skipping Firecrawl URL: %s", exc)
-            continue
-        if validated not in candidates:
-            candidates.append(validated)
-        if len(candidates) >= config.firecrawl_max_pages:
-            break
-    if not candidates:
-        raise ToolError("No allowed URLs available for Firecrawl")
-
-    async with httpx.AsyncClient(timeout=config.tool_timeout) as client:
-        async def scrape(url: str) -> dict[str, Any] | None:
-            response = await client.post(
-                f"{config.firecrawl_base_url.rstrip('/')}/v1/scrape",
-                headers={"Authorization": f"Bearer {config.firecrawl_api_key}"},
-                json={
-                    "url": url,
-                    "formats": ["markdown"],
-                    "onlyMainContent": True,
-                    "maxAge": 0,
-                },
-            )
-            response.raise_for_status()
-            payload = response.json()
-            data = payload.get("data", payload)
-            markdown = data.get("markdown") or data.get("content") or ""
-            metadata = data.get("metadata", {}) or {}
-            if not markdown:
-                return None
-            return _evidence(
-                title=metadata.get("title") or url,
-                url=url,
-                provider="firecrawl",
-                content=markdown,
-                published_at=metadata.get("publishedTime") or metadata.get("published_at"),
-            )
-
-        fetched = await asyncio.gather(*(scrape(url) for url in candidates), return_exceptions=True)
     return [item for item in fetched if isinstance(item, dict)]

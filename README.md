@@ -1,6 +1,6 @@
 # 🚀 Autonomous Multi-Agent Research Platform
 
-A production-grade, distributed multi-agent research and synthesis platform built with **LangGraph**, **FastAPI**, **Redis Streams**, and **React**. It accepts complex research queries, coordinates specialized autonomous agents to gather real-time evidence across live web tools (Tavily, Wikipedia, Firecrawl), cross-examines findings with an adversarial critic agent, and streams progress live to the client via **WebSockets**.
+A production-grade, distributed multi-agent research and synthesis platform built with **LangGraph**, **FastAPI**, **Redis Streams**, and **React**. It accepts complex research queries, coordinates specialized autonomous agents to gather real-time evidence across live web tools (**Tavily AI Search** and **Wikipedia**), cross-examines findings with an adversarial critic agent, and streams progress live to the client via **WebSockets**.
 
 ---
 
@@ -32,12 +32,11 @@ flowchart TD
         Worker["Async Scalable Worker Pool\n(Semaphore Concurrency)"]
         
         subgraph Graph ["LangGraph Orchestration Graph"]
-            Plan["🎯 Plan Agent\n(Deconstruct query & select tools)"]
+            Plan["🎯 Plan Agent\n(Deconstruct query & formulate search)"]
             
             subgraph Search ["Evidence Gathering Layer"]
-                Tavily["🔍 Tavily Web Search"]
-                Wiki["📚 Wikipedia API"]
-                Firecrawl["🕸️ Firecrawl Deep Scraper\n(Domain Allowlist Enforced)"]
+                Tavily["🔍 Tavily AI Search\n(Live Web Discovery & Page Extraction)"]
+                Wiki["📚 Wikipedia API\n(Foundational Knowledge)"]
             end
             
             Merge["🌐 Deduplicate & Verify Citations"]
@@ -74,8 +73,8 @@ flowchart TD
     %% Worker Execution
     StreamQ --> Worker
     Worker --> Graph
-    Plan --> Tavily & Wiki & Firecrawl
-    Tavily & Wiki & Firecrawl --> Merge
+    Plan --> Tavily & Wiki
+    Tavily & Wiki --> Merge
     Merge --> Summarize
     Summarize --> Writer
     Writer --> Critic
@@ -97,12 +96,12 @@ flowchart TD
 
 ## ⚡ Key Highlights & Engineering Features
 
-* **🔴 Live WebSocket Streaming**: Every LangGraph agent node publishes real-time execution milestones (queries generated, URLs fetched, citations assembled, critique flags) through Redis PubSub and WebSockets with an in-memory buffer fallback and automatic heartbeat.
+* **🔴 Live WebSocket Streaming**: Every LangGraph agent node publishes real-time execution milestones (queries generated, URLs fetched, citations assembled, critic feedback) through Redis PubSub and WebSockets with an in-memory buffer fallback and automatic heartbeat.
 * **🛡️ Resilient Transport**: The frontend leverages dual-mode streaming—streaming through WebSockets with an instantaneous, transparent fallback to HTTP event polling (`/events/{job_id}`) if proxies or firewalls disrupt the socket connection.
 * **🤖 Autonomous Multi-Agent Orchestration**:
-  1. **Planning Agent**: Decomposes user inquiries into focused search queries and dynamically chooses among Tavily, Wikipedia, and Firecrawl.
-  2. **Search Agents**: Execute concurrently with built-in SSRF protection, strict private IP rejection, timeouts, and domain allowlists.
-  3. **Evidence Merger**: Canonicalizes sources, validates URLs, and assigns unique citations (`[S1]`, `[S2]`).
+  1. **Planning Agent**: Decomposes complex user inquiries into focused search queries and coordinates search tools.
+  2. **Search Agents**: Concurrently execute **Tavily AI Search** (live web discovery + clean markdown page extraction) and **Wikipedia** with built-in SSRF protection, strict private IP resolution denial, rate limiting, and timeouts.
+  3. **Evidence Merger**: Canonicalizes sources, validates URLs, deduplicates findings, and assigns unique citations (`[S1]`, `[S2]`).
   4. **Summarizer Agent**: Synthesizes cross-source evidence and extracts verified facts.
   5. **Writer Agent**: Composes comprehensive reports with precise in-text citations.
   6. **Critic Agent (Adversarial Reviewer)**: Audits drafts for hallucinations, missing context, and invalid citations; loops back to writer if quality thresholds are not met.
@@ -121,7 +120,7 @@ flowchart TD
 │   ├── main.py          # FastAPI application, REST endpoints, and WebSocket /ws/{job_id}
 │   ├── streaming.py     # Real-time event publisher, subscriber, and WebSocket connection manager
 │   ├── agents.py        # LangGraph state graph, multi-agent definitions, and event hooks
-│   ├── tools.py         # Tavily, Wikipedia, and Firecrawl clients with security validation
+│   ├── tools.py         # Tavily and Wikipedia search clients with security validation
 │   ├── worker.py        # Standalone worker loop for horizontal background task scaling
 │   ├── queue.py         # Redis Streams consumer group manager and dead-letter handling
 │   ├── memory.py        # Redis session memory and PostgreSQL report persistence
@@ -163,9 +162,9 @@ Copy-Item .env.example .env
 Edit `.env` and provide your API keys:
 * `GEMINI_API_KEY`: Primary LLM via Google AI Studio
 * `GROQ_API_KEY`: Fallback LLM via Groq Cloud
-* `TAVILY_API_KEY`: Web search
-* `FIRECRAWL_API_KEY`: Deep scraping (optional, required if using domain allowlist)
-* `FIRECRAWL_ALLOWED_DOMAINS`: Comma-separated domains (e.g. `arxiv.org,github.com`)
+* `TAVILY_API_KEY`: Web search & page extraction
+
+*(Wikipedia works out of the box with zero keys required.)*
 
 ### 2. Run with Docker Compose
 ```powershell
@@ -290,7 +289,7 @@ Run the test suite across all agents, tools, queue mechanics, guardrails, and st
 
 All 20 test cases cover:
 * LangGraph state graph routing and critic revision boundaries.
-* Tool URL security checks, private IP resolution denial, and Firecrawl allowlists.
+* Tool URL security checks and private IP resolution denial.
 * WebSocket streaming event publishing, queue replay, and heartbeat handling.
 * Redis Streams failure retries, message claims, and dead-letter queues.
 * Bedrock guardrail intervention interception.

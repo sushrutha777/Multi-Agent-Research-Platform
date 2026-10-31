@@ -59,25 +59,11 @@ class Config:
 
         # Live research tools
         self.tavily_api_key: str = data.get("TAVILY_API_KEY", "")
-        self.firecrawl_api_key: str = data.get("FIRECRAWL_API_KEY", "")
         self.wikipedia_enabled: bool = data.get("WIKIPEDIA_ENABLED", "true").lower() == "true"
         self.search_max_results: int = int(data.get("SEARCH_MAX_RESULTS", 5))
         self.max_tool_calls: int = int(data.get("MAX_TOOL_CALLS", 8))
         self.tool_rate_limit_per_minute: int = int(data.get("TOOL_RATE_LIMIT_PER_MINUTE", 30))
         self.tool_timeout: float = float(data.get("TOOL_TIMEOUT", 30))
-        self.firecrawl_base_url: str = data.get("FIRECRAWL_BASE_URL", "https://api.firecrawl.dev")
-        self.firecrawl_allowed_domains: list[str] = [
-            domain.strip().lower()
-            for domain in data.get("FIRECRAWL_ALLOWED_DOMAINS", "").split(",")
-            if domain.strip()
-        ]
-        self.firecrawl_allowed_paths: list[str] = [
-            path.strip()
-            for path in data.get("FIRECRAWL_ALLOWED_PATHS", "").split(",")
-            if path.strip()
-        ]
-        self.firecrawl_max_pages: int = int(data.get("FIRECRAWL_MAX_PAGES", 3))
-        self.firecrawl_max_depth: int = int(data.get("FIRECRAWL_MAX_DEPTH", 0))
 
         # Report cache. It is exact-key only; it is never used as vector/RAG retrieval.
         self.cache_reports: bool = data.get("CACHE_REPORTS", "false").lower() == "true"

@@ -188,7 +188,7 @@ export default function LiveProgress({ events = [], isLive = true, onReportReady
                         <div className="tool-badges">
                           {(stepInfo.plan.tools || []).map((tool) => (
                             <span key={tool} className={`tool-badge tool-${tool}`}>
-                              {tool === "tavily" ? "🔍 Tavily Web" : tool === "wikipedia" ? "📚 Wikipedia" : "🕸️ Firecrawl"}
+                              {tool === "tavily" ? "🔍 Tavily Web" : "📚 Wikipedia"}
                             </span>
                           ))}
                         </div>

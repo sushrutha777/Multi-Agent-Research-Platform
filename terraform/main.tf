@@ -619,7 +619,6 @@ resource "aws_secretsmanager_secret_version" "config" {
     GEMINI_API_KEY   = "REPLACE_ME"
     GROQ_API_KEY     = "REPLACE_ME"
     TAVILY_API_KEY   = "REPLACE_ME"
-    FIRECRAWL_API_KEY = "REPLACE_ME"
 
     # Observability
     LANGSMITH_API_KEY = "REPLACE_ME"
@@ -662,9 +661,6 @@ resource "aws_secretsmanager_secret_version" "config" {
     DB_POOL_MIN               = "2"
     DB_POOL_MAX               = "10"
     CACHE_REPORTS             = "false"
-    FIRECRAWL_ALLOWED_DOMAINS = ""
-    FIRECRAWL_MAX_PAGES       = "3"
-    FIRECRAWL_MAX_DEPTH       = "0"
     TOOL_RATE_LIMIT_PER_MINUTE = "30"
     ALLOWED_ORIGINS           = ""
     START_WORKER              = "true"

@@ -509,7 +509,7 @@ export default function App() {
             <div className="hero">
               <div className="hero-eyebrow">Multi-Agent Autonomous Research Platform</div>
               <h1>Deep Research<br />Powered by Agents</h1>
-              <p>Autonomous agents strategize, gather web evidence from Tavily, Wikipedia & Firecrawl, cross-examine facts with an LLM critic, and generate verified reports with live WebSocket streaming.</p>
+              <p>Autonomous agents strategize, gather web evidence from Tavily Search & Wikipedia, cross-examine facts with an LLM critic, and generate verified reports with live WebSocket streaming.</p>
             </div>
           )}
 
