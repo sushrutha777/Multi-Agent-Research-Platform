@@ -13,6 +13,7 @@ from langsmith import traceable
 
 from app.config import Config
 from app.retry import with_retry
+from app.streaming import emit_event
 from app.tools import ToolError, firecrawl_scrape, tavily_search, wikipedia_search
 
 
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class ResearchState(TypedDict, total=False):
+    job_id: str
     user_query: str
     session_id: str
     research_plan: dict[str, Any]
@@ -282,16 +284,43 @@ class CriticAgent:
 
 
 class OrchestratorAgent:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, redis: Any = None):
         self.config = config
+        self.redis = redis
         self.search_agent = SearchAgent(config)
         self.summarize_agent = SummarizerAgent(config)
         self.writer_agent = WriterAgent(config)
         self.critic_agent = CriticAgent(config)
 
+    async def _emit(
+        self,
+        state: ResearchState,
+        event_type: str,
+        step: str,
+        title: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        job_id = state.get("job_id")
+        if job_id:
+            try:
+                await emit_event(self.redis, job_id, event_type, step, title, details)
+            except Exception as exc:
+                logger.debug("Failed to emit event: %s", exc)
+
     @traceable(run_type="chain", name="orchestrator:plan")
     async def plan_node(self, state: ResearchState) -> dict[str, Any]:
-        return {"research_plan": await self.search_agent.plan(state["user_query"]), "status": "planning"}
+        await self._emit(state, "status", "planning", "Formulating research strategy and selecting optimal search tools...")
+        plan = await self.search_agent.plan(state["user_query"])
+        tools = plan.get("tools", [])
+        queries = plan.get("queries", [])
+        await self._emit(
+            state,
+            "plan",
+            "planning",
+            f"Strategy ready: {len(queries)} query(ies) across {', '.join(tools) if tools else 'search'}",
+            {"tools": tools, "queries": queries, "urls": plan.get("urls", [])},
+        )
+        return {"research_plan": plan, "status": "planning"}
 
     def route_initial_tools(self, state: ResearchState) -> list[str]:
         tools = state.get("research_plan", {}).get("tools", [])
@@ -299,27 +328,102 @@ class OrchestratorAgent:
 
     @traceable(run_type="chain", name="orchestrator:tavily")
     async def tavily_node(self, state: ResearchState) -> dict[str, Any]:
+        queries = state.get("research_plan", {}).get("queries", [])
+        await self._emit(
+            state,
+            "tool_start",
+            "searching",
+            f"Querying Tavily Web Search ({len(queries)} queries)...",
+            {"provider": "tavily", "queries": queries},
+        )
         try:
-            return {"source_deltas": await self.search_agent.tavily(state["research_plan"])}
+            sources = await self.search_agent.tavily(state["research_plan"])
+            await self._emit(
+                state,
+                "tool_result",
+                "searching",
+                f"Retrieved {len(sources)} web sources from Tavily",
+                {
+                    "provider": "tavily",
+                    "count": len(sources),
+                    "sources": [{"title": s.get("title"), "url": s.get("url")} for s in sources[:5]],
+                },
+            )
+            return {"source_deltas": sources}
         except Exception as exc:
+            await self._emit(
+                state,
+                "tool_error",
+                "searching",
+                f"Tavily search encountered an issue: {exc}",
+                {"provider": "tavily", "error": str(exc)},
+            )
             return {"errors": [f"Tavily failed: {exc}"]}
 
     @traceable(run_type="chain", name="orchestrator:wikipedia")
     async def wikipedia_node(self, state: ResearchState) -> dict[str, Any]:
+        await self._emit(
+            state,
+            "tool_start",
+            "searching",
+            "Searching Wikipedia reference encyclopedia...",
+            {"provider": "wikipedia"},
+        )
         try:
-            return {"source_deltas": await self.search_agent.wikipedia(state["research_plan"])}
+            sources = await self.search_agent.wikipedia(state["research_plan"])
+            await self._emit(
+                state,
+                "tool_result",
+                "searching",
+                f"Retrieved {len(sources)} Wikipedia articles",
+                {
+                    "provider": "wikipedia",
+                    "count": len(sources),
+                    "sources": [{"title": s.get("title"), "url": s.get("url")} for s in sources[:5]],
+                },
+            )
+            return {"source_deltas": sources}
         except Exception as exc:
+            await self._emit(
+                state,
+                "tool_error",
+                "searching",
+                f"Wikipedia search failed: {exc}",
+                {"provider": "wikipedia", "error": str(exc)},
+            )
             return {"errors": [f"Wikipedia failed: {exc}"]}
 
     @traceable(run_type="chain", name="orchestrator:firecrawl")
     async def firecrawl_node(self, state: ResearchState) -> dict[str, Any]:
+        sources = state.get("sources") or state.get("source_deltas", [])
+        await self._emit(
+            state,
+            "tool_start",
+            "searching",
+            "Scraping deep web content with Firecrawl...",
+            {"provider": "firecrawl"},
+        )
         try:
-            sources = state.get("sources") or state.get("source_deltas", [])
+            results = await self.search_agent.firecrawl(state["research_plan"], sources)
+            await self._emit(
+                state,
+                "tool_result",
+                "searching",
+                f"Scraped {len(results)} target pages via Firecrawl",
+                {"provider": "firecrawl", "count": len(results)},
+            )
             return {
-                "source_deltas": await self.search_agent.firecrawl(state["research_plan"], sources),
+                "source_deltas": results,
                 "status": "scraping",
             }
         except Exception as exc:
+            await self._emit(
+                state,
+                "tool_error",
+                "searching",
+                f"Firecrawl scraping error: {exc}",
+                {"provider": "firecrawl", "error": str(exc)},
+            )
             return {"errors": [f"Firecrawl failed: {exc}"], "status": "scraping"}
 
     def route_after_search(self, state: ResearchState) -> str:
@@ -344,20 +448,45 @@ class OrchestratorAgent:
             item = dict(source)
             item["citation_id"] = f"S{len(unique) + 1}"
             unique.append(item)
+
+        citations = [
+            {key: source.get(key) for key in ("citation_id", "title", "url", "provider", "retrieved_at", "published_at")}
+            for source in unique
+        ]
+
+        await self._emit(
+            state,
+            "sources",
+            "searching",
+            f"Assembled and verified {len(unique)} unique evidence sources",
+            {"count": len(unique), "citations": citations},
+        )
+
         return {
             "sources": unique,
             "evidence": unique,
-            "citations": [
-                {key: source.get(key) for key in ("citation_id", "title", "url", "provider", "retrieved_at", "published_at")}
-                for source in unique
-            ],
+            "citations": citations,
             "status": "evidence_ready",
         }
 
     @traceable(run_type="chain", name="orchestrator:summarize")
     async def summarize_node(self, state: ResearchState) -> dict[str, Any]:
+        await self._emit(
+            state,
+            "status",
+            "summarizing",
+            "Synthesizing key findings and evidence across all sources...",
+        )
         try:
             summary = await self.summarize_agent.run(state["user_query"], state.get("sources", []))
+            summary_text = summary.get("summary", "")
+            await self._emit(
+                state,
+                "summary",
+                "summarizing",
+                "Evidence synthesis complete",
+                {"preview": summary_text[:300]},
+            )
             return {"summaries": [summary], "status": "summarized"}
         except Exception as exc:
             return {
@@ -368,6 +497,14 @@ class OrchestratorAgent:
 
     @traceable(run_type="chain", name="orchestrator:write")
     async def write_node(self, state: ResearchState) -> dict[str, Any]:
+        iteration = state.get("iteration_count", 0) + 1
+        await self._emit(
+            state,
+            "status",
+            "writing",
+            f"Drafting comprehensive report (Iteration {iteration})...",
+            {"iteration": iteration},
+        )
         try:
             draft = await self.writer_agent.run(
                 state["user_query"],
@@ -375,10 +512,17 @@ class OrchestratorAgent:
                 state.get("summaries", []),
                 state.get("critique"),
             )
+            await self._emit(
+                state,
+                "draft",
+                "writing",
+                f"Report draft {iteration} prepared ({len(draft)} characters)",
+                {"draft": draft, "iteration": iteration},
+            )
             return {
                 "draft": draft,
                 "report": draft,
-                "iteration_count": state.get("iteration_count", 0) + 1,
+                "iteration_count": iteration,
                 "status": "drafted",
             }
         except Exception as exc:
@@ -386,14 +530,29 @@ class OrchestratorAgent:
                 "draft": "The report could not be generated because the writer failed.",
                 "report": "The report could not be generated because the writer failed.",
                 "errors": [f"Writer failed: {exc}"],
-                "iteration_count": state.get("iteration_count", 0) + 1,
+                "iteration_count": iteration,
                 "status": "drafted",
             }
 
     @traceable(run_type="chain", name="orchestrator:critic")
     async def critic_node(self, state: ResearchState) -> dict[str, Any]:
+        await self._emit(
+            state,
+            "status",
+            "critiquing",
+            "Critic reviewing draft for factual accuracy, hallucinations & citation alignment...",
+        )
         critique = await self.critic_agent.run(
             state["user_query"], state.get("draft", ""), state.get("sources", [])
+        )
+        passed = critique.get("passed", False)
+        verdict = "passed all checks" if passed else "identified areas for revision"
+        await self._emit(
+            state,
+            "critique",
+            "critiquing",
+            f"Review completed: {verdict}",
+            {"critique": critique, "passed": passed},
         )
         return {"critique": critique, "status": "criticized"}
 
@@ -407,11 +566,18 @@ class OrchestratorAgent:
     async def finalize_node(self, state: ResearchState) -> dict[str, Any]:
         critique = state.get("critique", {})
         status = "completed" if critique.get("passed") else "completed_with_warnings"
+        await self._emit(
+            state,
+            "status",
+            "finalizing",
+            "Finalizing report and formatting citations...",
+            {"status": status},
+        )
         return {"report": state.get("draft", ""), "status": status}
 
 
-def build_graph(config: Config):
-    orchestrator = OrchestratorAgent(config)
+def build_graph(config: Config, redis: Any = None):
+    orchestrator = OrchestratorAgent(config, redis=redis)
     workflow = StateGraph(ResearchState)
 
     workflow.add_node("plan", orchestrator.plan_node)

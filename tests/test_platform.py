@@ -193,3 +193,43 @@ def test_report_generation_preserves_structured_output():
     assert payload["topic"] == "topic"
     assert payload["word_count"] == 4
     assert generate_pdf("topic", "report").startswith(b"%PDF")
+
+
+def test_websocket_stream_receives_events():
+    import json
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.streaming import emit_event
+    import asyncio
+
+    job_id = "test-ws-job"
+    asyncio.run(
+        emit_event(
+            redis=None,
+            job_id=job_id,
+            event_type="status",
+            step="planning",
+            title="Formulating strategy",
+        )
+    )
+    asyncio.run(
+        emit_event(
+            redis=None,
+            job_id=job_id,
+            event_type="completed",
+            step="finalizing",
+            title="Research completed",
+            details={"report": "Final Report Content"},
+        )
+    )
+
+    client = TestClient(app)
+    with client.websocket_connect(f"/ws/{job_id}") as websocket:
+        data1 = json.loads(websocket.receive_text())
+        assert data1["type"] == "status"
+        assert data1["step"] == "planning"
+
+        data2 = json.loads(websocket.receive_text())
+        assert data2["type"] == "completed"
+        assert data2["details"]["report"] == "Final Report Content"
+

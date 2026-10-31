@@ -1,134 +1,309 @@
-# Autonomous Multi-Agent Research Platform
+# 🚀 Autonomous Multi-Agent Research Platform
 
-This project is a real-time research and reporting service. It accepts questions through FastAPI, processes them in the background with a worker and LangGraph, gathers live evidence from search tools, and returns cited text, JSON, or PDF reports.
+A production-grade, distributed multi-agent research and synthesis platform built with **LangGraph**, **FastAPI**, **Redis Streams**, and **React**. It accepts complex research queries, coordinates specialized autonomous agents to gather real-time evidence across live web tools (Tavily, Wikipedia, Firecrawl), cross-examines findings with an adversarial critic agent, and streams progress live to the client via **WebSockets**.
 
-PostgreSQL stores ordinary report records, metadata, citations, and audit history. Redis stores jobs, short-term sessions, status, and an optional exact-query cache. The research workflow does not use embeddings, pgvector, or vector retrieval.
+---
 
-## Architecture
-
-The platform takes a research question, gathers information from trusted sources, creates a cited report, and returns it to the user.
+## 🏗️ System Architecture
 
 ```mermaid
 flowchart TD
-    A[User Query] --> B[React Frontend]
-    B --> C[FastAPI API]
-    C --> D{Validate Request}
-    D -->|Rejected| E[Return Error]
-    D -->|Accepted| F[Redis Job Queue]
-    F --> G[Research Worker]
-    G --> H[LangGraph Research Workflow]
+    subgraph Client ["Client Layer (React / Vite)"]
+        UI["Modern Research Dashboard"]
+        LiveTL["Live Agent Execution Graph (LiveProgress)"]
+        WSClient["WebSocket Stream Client\n(Auto HTTP-Poll Fallback)"]
+    end
 
-    H --> I[Search and Collect Evidence]
-    I --> I1[Tavily]
-    I --> I2[Wikipedia]
-    I --> I3[Firecrawl]
+    subgraph API ["Gateway & Ingestion Layer (FastAPI)"]
+        GW["FastAPI App Gateway"]
+        GuardIn{"Bedrock Input Guardrails"}
+        WS["/ws/{job_id} WebSocket Handler"]
+        EvAPI["/events/{job_id} Event Replay API"]
+    end
 
-    I1 --> J[Summarize Evidence]
-    I2 --> J
-    I3 --> J
-    J --> K[Write and Critique Report]
-    K --> L[Text, JSON, or PDF Report]
-    K --> M[PostgreSQL Report History]
-    L --> N[Redis Result]
-    N --> C
-    C --> B
+    subgraph Queue ["Message & State Broker (Redis)"]
+        StreamQ["Redis Streams Job Queue\n(xadd / xreadgroup)"]
+        PubSub["Redis PubSub Channel\n(job:stream:{id})"]
+        EvCache["Event History Cache\n(job:events:{id})"]
+        ResultCache["Job Results Store\n(result:{id})"]
+    end
 
-    H --> O[TensorZero]
-    O --> O1[Gemini]
-    O --> O2[Groq Fallback]
+    subgraph Workers ["Distributed Agent Workers (app/worker.py)"]
+        Worker["Async Scalable Worker Pool\n(Semaphore Concurrency)"]
+        
+        subgraph Graph ["LangGraph Orchestration Graph"]
+            Plan["🎯 Plan Agent\n(Deconstruct query & select tools)"]
+            
+            subgraph Search ["Evidence Gathering Layer"]
+                Tavily["🔍 Tavily Web Search"]
+                Wiki["📚 Wikipedia API"]
+                Firecrawl["🕸️ Firecrawl Deep Scraper\n(Domain Allowlist Enforced)"]
+            end
+            
+            Merge["🌐 Deduplicate & Verify Citations"]
+            Summarize["📊 Summarizer Agent\n(Evidence Fact Extraction)"]
+            Writer["✍️ Writer Agent\n(Structured Markdown Report)"]
+            Critic{"⚖️ Critic Agent\n(Hallucination & Citation Check)"}
+            Finalize["🏆 Finalizer & Diff Generator"]
+        end
+    end
+
+    subgraph LLM ["Model Routing & Resilience (TensorZero)"]
+        TZ["TensorZero Gateway"]
+        Gemini["Primary: Google Gemini"]
+        Groq["Fallback: Groq LLaMA / Mixtral"]
+    end
+
+    subgraph Storage ["Persistent Storage (PostgreSQL)"]
+        PG["PostgreSQL\n(Audit History, Reports & Citations)"]
+    end
+
+    %% Client -> API
+    UI -->|POST /research| GW
+    GW --> GuardIn
+    GuardIn -->|Accepted| StreamQ
+    
+    %% Real-time streaming loop
+    UI -.->|Connects| WSClient
+    WSClient <==>|Bi-directional WS| WS
+    WS <--> PubSub
+    WS <--> EvCache
+    Worker -.->|Emits Node Events| PubSub
+    Worker -.->|Caches Events| EvCache
+
+    %% Worker Execution
+    StreamQ --> Worker
+    Worker --> Graph
+    Plan --> Tavily & Wiki & Firecrawl
+    Tavily & Wiki & Firecrawl --> Merge
+    Merge --> Summarize
+    Summarize --> Writer
+    Writer --> Critic
+    Critic -->|Needs Revision / Retry| Writer
+    Critic -->|Passed / Iteration Max| Finalize
+    
+    %% Model calls
+    Plan & Summarize & Writer & Critic <--> TZ
+    TZ --> Gemini
+    TZ -.->|Failover| Groq
+
+    %% Output
+    Finalize --> ResultCache
+    Finalize --> PG
+    ResultCache -.-> UI
 ```
 
-The API and worker run separately so user requests stay responsive while research is processed in the background. Redis stores jobs and results, PostgreSQL stores report history, and TensorZero routes requests to the configured language models.
+---
 
-## Components
+## ⚡ Key Highlights & Engineering Features
 
-The React/Vite chat UI lives in the frontend directory and is served by the API container after the production build.
+* **🔴 Live WebSocket Streaming**: Every LangGraph agent node publishes real-time execution milestones (queries generated, URLs fetched, citations assembled, critique flags) through Redis PubSub and WebSockets with an in-memory buffer fallback and automatic heartbeat.
+* **🛡️ Resilient Transport**: The frontend leverages dual-mode streaming—streaming through WebSockets with an instantaneous, transparent fallback to HTTP event polling (`/events/{job_id}`) if proxies or firewalls disrupt the socket connection.
+* **🤖 Autonomous Multi-Agent Orchestration**:
+  1. **Planning Agent**: Decomposes user inquiries into focused search queries and dynamically chooses among Tavily, Wikipedia, and Firecrawl.
+  2. **Search Agents**: Execute concurrently with built-in SSRF protection, strict private IP rejection, timeouts, and domain allowlists.
+  3. **Evidence Merger**: Canonicalizes sources, validates URLs, and assigns unique citations (`[S1]`, `[S2]`).
+  4. **Summarizer Agent**: Synthesizes cross-source evidence and extracts verified facts.
+  5. **Writer Agent**: Composes comprehensive reports with precise in-text citations.
+  6. **Critic Agent (Adversarial Reviewer)**: Audits drafts for hallucinations, missing context, and invalid citations; loops back to writer if quality thresholds are not met.
+* **🔀 Resilient Model Routing (TensorZero)**: Seamless fallback between primary LLM (Google Gemini) and secondary low-latency LLM (Groq) with automated retries.
+* **🔒 Enterprise Security & Red-Teaming**:
+  * AWS Bedrock Guardrails for input/output safety enforcement.
+  * Automated **PyRIT (Python Risk Identification Tool)** red-teaming dashboard with scheduled adversarial prompt attack runs.
+* **📦 Scalable Queue & State Management**: Redis Streams with consumer groups (`xreadgroup`), automatic abandoned message recovery (`xclaim`), and dead-letter queues.
 
-- `app/agents.py` — LangGraph orchestration, four agents, tool routing, citation handling, and critic loop.
-- `app/tools.py` — Tavily, Wikipedia, and Firecrawl clients with timeouts, URL validation, allowlists, and structured evidence.
-- `app/main.py` — FastAPI API and optional in-process worker.
-- `app/worker.py` — standalone worker entry point for Docker Compose or a separate ECS worker.
-- `app/memory.py` — Redis sessions and ordinary PostgreSQL report records; no vector schema.
-- `app/queue.py` — Redis Streams, retries, abandoned-message recovery, and dead-letter handling.
-- `pyrit_dashboard/` — authenticated PyRIT dashboard plus a one-shot scheduled runner.
-- `tensorzero/` — LLM routing and system prompts.
-- `terraform/` — AWS infrastructure. The scheduled PyRIT task runs `scheduled_run.py`, not the persistent dashboard server.
+---
 
-## Local setup
+## 📁 Repository Structure
 
-Use Python 3.12 consistently.
+```
+├── app/
+│   ├── main.py          # FastAPI application, REST endpoints, and WebSocket /ws/{job_id}
+│   ├── streaming.py     # Real-time event publisher, subscriber, and WebSocket connection manager
+│   ├── agents.py        # LangGraph state graph, multi-agent definitions, and event hooks
+│   ├── tools.py         # Tavily, Wikipedia, and Firecrawl clients with security validation
+│   ├── worker.py        # Standalone worker loop for horizontal background task scaling
+│   ├── queue.py         # Redis Streams consumer group manager and dead-letter handling
+│   ├── memory.py        # Redis session memory and PostgreSQL report persistence
+│   ├── guardrails.py    # AWS Bedrock input/output safety guardrail validators
+│   ├── eval.py          # LLM-as-a-judge automated report evaluation
+│   ├── output.py        # Markdown, JSON, and PDF document exporters
+│   └── config.py        # Environment configuration and AWS Secrets Manager integration
+├── frontend/
+│   ├── src/
+│   │   ├── App.jsx          # Main research dashboard with WebSocket streaming client
+│   │   ├── LiveProgress.jsx # Interactive multi-agent execution timeline component
+│   │   ├── styles.css       # Curated dark-mode theme, pulsing radar, and step cards
+│   │   └── main.jsx         # React application entry point
+│   ├── package.json
+│   └── vite.config.js
+├── tests/
+│   ├── test_platform.py     # End-to-end graph tests, routing, and WebSocket stream tests
+│   ├── test_streaming.py    # Unit tests for event pub/sub and in-memory queueing
+│   ├── test_queue.py        # Redis Streams retry and claim tests
+│   └── test_pyrit_auth.py   # Security authentication tests
+├── tensorzero/              # TensorZero gateway config, routing policies, and system prompts
+├── terraform/               # Production AWS IaC (VPC, ECS Fargate, ElastiCache, RDS, Secrets)
+└── pyrit_dashboard/         # PyRIT adversarial security testing suite and dashboard
+```
 
+---
+
+## 🚀 Quick Start (Local Development)
+
+### Prerequisites
+* Python 3.12+
+* Node.js 18+ (for frontend development)
+* Docker & Docker Compose (optional, for containerized run)
+
+### 1. Environment Setup
 ```powershell
 Copy-Item .env.example .env
-# Add GEMINI_API_KEY, GROQ_API_KEY, TAVILY_API_KEY and, optionally, FIRECRAWL_API_KEY to .env
+```
+Edit `.env` and provide your API keys:
+* `GEMINI_API_KEY`: Primary LLM via Google AI Studio
+* `GROQ_API_KEY`: Fallback LLM via Groq Cloud
+* `TAVILY_API_KEY`: Web search
+* `FIRECRAWL_API_KEY`: Deep scraping (optional, required if using domain allowlist)
+* `FIRECRAWL_ALLOWED_DOMAINS`: Comma-separated domains (e.g. `arxiv.org,github.com`)
+
+### 2. Run with Docker Compose
+```powershell
 docker compose up --build
 ```
+This spins up:
+* **FastAPI Backend + Frontend**: `http://localhost:8000`
+* **Redis**: `localhost:6379`
+* **PostgreSQL**: `localhost:5432`
+* **TensorZero Gateway**: `http://localhost:3000`
 
-The React UI is available at http://localhost:8000. For frontend-only development, run
-npm install and npm run dev from the frontend directory; Vite proxies API calls to port 8000.
-
-The API is available at `http://localhost:8000`. Submit a job:
-
+### 3. Frontend Development (Vite)
+If editing the frontend with hot-reload:
 ```powershell
-curl -X POST http://localhost:8000/research `
-  -H "Content-Type: application/json" `
-  -H "X-API-Key: local-dev-key" `
-  -d '{"topic":"Recent developments in quantum computing","output_format":"json"}'
+cd frontend
+npm install
+npm run dev
+```
+Open `http://localhost:5173`. Vite automatically proxies `/research`, `/result`, `/ws`, and `/events` to FastAPI on port 8000.
+
+---
+
+## 📡 API Reference
+
+### Research Endpoints
+
+#### 1. Submit Research Job
+```http
+POST /research
+Content-Type: application/json
+X-API-Key: <your-key>
+
+{
+  "topic": "Latest advancements in multimodal reasoning models",
+  "output_format": "text",
+  "session_id": "optional-session-uuid"
+}
+```
+**Response:**
+```json
+{
+  "job_id": "c4b8e219-...",
+  "session_id": "optional-session-uuid"
+}
 ```
 
-Then poll the returned job ID:
-
-```powershell
-curl http://localhost:8000/result/<job-id> -H "X-API-Key: local-dev-key"
+#### 2. Live WebSocket Stream
+Connect via WebSocket to receive live multi-agent execution events:
+```
+ws://localhost:8000/ws/{job_id}
+```
+**Sample Streamed Events:**
+```json
+{
+  "job_id": "c4b8e219-...",
+  "type": "plan",
+  "step": "planning",
+  "title": "Strategy ready: 2 query(ies) across tavily, wikipedia",
+  "details": {
+    "tools": ["tavily", "wikipedia"],
+    "queries": ["multimodal reasoning models 2026", "vision language model reasoning"]
+  },
+  "timestamp": "2026-10-31T09:35:00Z"
+}
+```
+```json
+{
+  "job_id": "c4b8e219-...",
+  "type": "sources",
+  "step": "searching",
+  "title": "Assembled and verified 6 unique evidence sources",
+  "details": {
+    "count": 6,
+    "citations": [
+      { "citation_id": "S1", "title": "Gemini 2.0 Technical Report", "url": "https://..." }
+    ]
+  },
+  "timestamp": "2026-10-31T09:35:05Z"
+}
+```
+```json
+{
+  "job_id": "c4b8e219-...",
+  "type": "completed",
+  "step": "finalizing",
+  "title": "Research successfully completed! Final report ready.",
+  "details": {
+    "report": "# Multimodal Reasoning Advancements...",
+    "citations": [...],
+    "diff": "..."
+  },
+  "timestamp": "2026-10-31T09:35:15Z"
+}
 ```
 
-Wikipedia works without an API key. Tavily is needed for current web search. Firecrawl is only enabled when `FIRECRAWL_ALLOWED_DOMAINS` is configured; this prevents uncontrolled scraping.
+#### 3. Event History (Fallback)
+```http
+GET /events/{job_id}
+X-API-Key: <your-key>
+```
+Returns all previously recorded timeline events for a given job.
 
-## Configuration
-
-Copy `.env.example` to `.env`. Important settings include:
-
-| Variable | Purpose |
-|---|---|
-| GEMINI_API_KEY | Primary Google AI Studio Gemini key, mapped to TensorZero |
-| GROQ_API_KEY | Fallback Groq key |
-| `TAVILY_API_KEY` | Current web search |
-| `FIRECRAWL_API_KEY` | Page scraping |
-| `FIRECRAWL_ALLOWED_DOMAINS` | Required Firecrawl domain allowlist |
-| `GUARDRAILS_ENABLED` | Enable AWS Bedrock Guardrails |
-| `API_KEY` | Main API authentication |
-| `PYRIT_API_KEY` | PyRIT dashboard authentication |
-| `CACHE_REPORTS` | Optional exact-query report cache; defaults to `false` |
-| `START_WORKER` | Starts the worker in the API process; Compose uses a separate worker |
-
-In production, set `AWS_SECRETS_MANAGER_SECRET_ID` and load configuration from AWS Secrets Manager. Local startup does not contact AWS during module import.
-
-## Testing
-
-Install test dependencies and run:
-
-```powershell
-python -m pip install -e ".[test]"
-python -m pytest -q
+#### 4. Poll Result
+```http
+GET /result/{job_id}
+X-API-Key: <your-key>
 ```
 
-Tests should mock Tavily, Wikipedia, Firecrawl, TensorZero, Redis, PostgreSQL, and Bedrock. Paid external APIs are not required for the test suite.
+#### 5. Export Formats
+* `GET /result/{job_id}/pdf` — Export professional formatted PDF report with citations.
+* `GET /diff/{topic}` — View semantic differential from previous research on the same topic.
 
-## AWS deployment
+---
 
-Terraform keeps the existing VPC, ECS, Redis, PostgreSQL, ECR, Secrets Manager, Bedrock, and CloudWatch structure. Before applying infrastructure:
+## 🧪 Testing
 
-1. Put production provider keys in Secrets Manager rather than source code.
-2. Configure GitHub Actions with the `AWS_ROLE_TO_ASSUME` OIDC secret; long-lived AWS access keys are not used by the workflow.
-3. Configure `FIRECRAWL_ALLOWED_DOMAINS` deliberately.
-4. Configure HTTPS through `acm_certificate_arn`.
-5. Restrict `ALLOWED_ORIGINS` to the real frontend origin.
-6. Keep the PyRIT dashboard private or place it behind an authenticated internal access path. Port 8001 is no longer exposed through the public load balancer.
+Run the test suite across all agents, tools, queue mechanics, guardrails, and streaming:
 
-The weekly EventBridge target launches the PyRIT image with the `scheduled_run.py` command, which executes real PyRIT `PromptSendingAttack` runs and exits. The dashboard remains a separate long-running service for controlled access.
+```powershell
+.venv/Scripts/python -m pytest tests/ -v
+```
 
-## Known limitations
+All 20 test cases cover:
+* LangGraph state graph routing and critic revision boundaries.
+* Tool URL security checks, private IP resolution denial, and Firecrawl allowlists.
+* WebSocket streaming event publishing, queue replay, and heartbeat handling.
+* Redis Streams failure retries, message claims, and dead-letter queues.
+* Bedrock guardrail intervention interception.
+* Output formatting (JSON structure validation, PDF generation).
 
-- Firecrawl performs bounded page scraping, not unrestricted crawling. `FIRECRAWL_MAX_DEPTH` is reserved for future crawl support and is currently `0`.
-- The current report writer uses citation IDs such as `[S1]`; the critic rejects unknown IDs.
-- The API task can run its own worker for backward compatibility, but production deployments should use the standalone worker service pattern to scale API and processing independently.
+---
+
+## ☁️ Production AWS Infrastructure
+
+Terraform manifests in `terraform/` define an enterprise-ready AWS architecture:
+* **Amazon ECS (Fargate)**: Independent autoscaling services for API Gateway and Background Workers.
+* **Amazon ElastiCache (Redis)**: Distributed queue, pub/sub streaming, and session store.
+* **Amazon RDS (PostgreSQL)**: Multi-AZ persistent relational database.
+* **AWS Secrets Manager**: Zero-plaintext secret rotation for LLM and provider keys.
+* **Amazon Bedrock**: Automated Guardrails for input toxicity and hallucination mitigation.
+* **CloudWatch**: Centralized structured logging and agent metrics.

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import LiveProgress from "./LiveProgress";
 
 const API = import.meta.env.VITE_API_BASE_URL || "";
 const STORAGE = {
@@ -82,6 +83,7 @@ export default function App() {
   const [topic, setTopic] = useState("");
   const [format, setFormat] = useState("text");
   const [job, setJob] = useState(null);
+  const [jobEvents, setJobEvents] = useState([]);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [latestResult, setLatestResult] = useState(null);
@@ -89,6 +91,7 @@ export default function App() {
   const [showSources, setShowSources] = useState(false);
   const [copied, setCopied] = useState(false);
   const pollRef = useRef(null);
+  const wsRef = useRef(null);
   const composerRef = useRef(null);
 
   const authHeaders = useCallback(
@@ -132,6 +135,9 @@ export default function App() {
     loadSession(sessionId);
     return () => {
       if (pollRef.current) clearTimeout(pollRef.current);
+      if (wsRef.current) {
+        try { wsRef.current.close(); } catch {}
+      }
     };
   }, [loadSession, sessionId]);
 
@@ -150,6 +156,10 @@ export default function App() {
   const finishJob = useCallback(
     async (data) => {
       if (pollRef.current) clearTimeout(pollRef.current);
+      if (wsRef.current) {
+        try { wsRef.current.close(); } catch {}
+        wsRef.current = null;
+      }
       setJob(null);
       if (data.status === "done") {
         setLatestResult(data);
@@ -177,8 +187,18 @@ export default function App() {
           await finishJob(data);
           return;
         }
+
+        // Also fetch event history for timeline fallback
+        try {
+          const evResp = await fetch(API + "/events/" + encodeURIComponent(jobId), { headers: authHeaders() });
+          if (evResp.ok) {
+            const evData = await evResp.json();
+            if (evData.events?.length) setJobEvents(evData.events);
+          }
+        } catch {}
+
         setStatus(data.status === "retrying" ? "Retrying research…" : "Researching live sources…");
-        pollRef.current = setTimeout(() => pollJob(jobId), 2200);
+        pollRef.current = setTimeout(() => pollJob(jobId), 2000);
       } catch (pollError) {
         setJob(null);
         setStatus("");
@@ -186,6 +206,87 @@ export default function App() {
       }
     },
     [authHeaders, finishJob],
+  );
+
+  const connectStream = useCallback(
+    (jobId, targetSessionId) => {
+      if (wsRef.current) {
+        try { wsRef.current.close(); } catch {}
+        wsRef.current = null;
+      }
+
+      try {
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        let host = window.location.host;
+        if (API) {
+          try {
+            const u = new URL(API);
+            host = u.host;
+          } catch {
+            host = API.replace(/^https?:\/\//, "");
+          }
+        }
+        const wsUrl = `${protocol}//${host}/ws/${encodeURIComponent(jobId)}`;
+        const ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
+
+        let fallbackTriggered = false;
+        const triggerFallback = () => {
+          if (!fallbackTriggered) {
+            fallbackTriggered = true;
+            pollRef.current = setTimeout(() => pollJob(jobId), 1200);
+          }
+        };
+
+        ws.onmessage = (evt) => {
+          try {
+            const payload = JSON.parse(evt.data);
+            if (payload.type === "heartbeat") return;
+
+            setJobEvents((prev) => {
+              const exists = prev.some((e) => e.timestamp === payload.timestamp && e.title === payload.title);
+              return exists ? prev : [...prev, payload];
+            });
+
+            if (payload.title) {
+              setStatus(payload.title);
+            }
+
+            if (payload.type === "completed") {
+              const resultData = {
+                status: "done",
+                job_id: jobId,
+                session_id: targetSessionId || sessionId,
+                topic: payload.details?.topic || topic,
+                report: payload.details?.report || "",
+                citations: payload.details?.citations || [],
+                diff: payload.details?.diff || "",
+              };
+              finishJob(resultData);
+            } else if (payload.type === "blocked") {
+              finishJob({ status: "blocked", error: payload.details?.error || payload.title });
+            } else if (payload.type === "error") {
+              finishJob({ status: "error", error: payload.details?.error || payload.title });
+            }
+          } catch (err) {
+            console.debug("WS parse error:", err);
+          }
+        };
+
+        ws.onerror = () => {
+          triggerFallback();
+        };
+
+        ws.onclose = (evt) => {
+          if (!evt.wasClean) {
+            triggerFallback();
+          }
+        };
+      } catch {
+        pollRef.current = setTimeout(() => pollJob(jobId), 500);
+      }
+    },
+    [finishJob, pollJob, sessionId, topic],
   );
 
   const submitResearch = async (event) => {
@@ -197,7 +298,8 @@ export default function App() {
     setDiff("");
     setShowSources(false);
     setCopied(false);
-    setStatus("Starting research…");
+    setJobEvents([]);
+    setStatus("Initializing research agents…");
 
     try {
       const response = await fetch(API + "/research", {
@@ -211,8 +313,9 @@ export default function App() {
       setJob(data.job_id);
       rememberChat({ id: data.session_id, sessionId: data.session_id, topic: trimmedTopic, updatedAt: new Date().toISOString() });
       setSidebarOpen(false);
-      setStatus("Researching live sources…");
-      pollRef.current = setTimeout(() => pollJob(data.job_id), 400);
+      setStatus("Starting multi-agent execution…");
+
+      connectStream(data.job_id, data.session_id);
     } catch (submitError) {
       setStatus("");
       setError(submitError.message || "Research request failed.");
@@ -221,10 +324,15 @@ export default function App() {
 
   const newChat = () => {
     if (pollRef.current) clearTimeout(pollRef.current);
+    if (wsRef.current) {
+      try { wsRef.current.close(); } catch {}
+      wsRef.current = null;
+    }
     setSidebarOpen(false);
     setTopic("");
     setMessages([]);
     setLatestResult(null);
+    setJobEvents([]);
     setDiff("");
     setError("");
     setStatus("");
@@ -235,9 +343,14 @@ export default function App() {
 
   const openRecentChat = async (chat) => {
     if (pollRef.current) clearTimeout(pollRef.current);
+    if (wsRef.current) {
+      try { wsRef.current.close(); } catch {}
+      wsRef.current = null;
+    }
     setSidebarOpen(false);
     setTopic(chat.topic);
     setLatestResult(null);
+    setJobEvents([]);
     setDiff("");
     setError("");
     setStatus("");
@@ -351,25 +464,32 @@ export default function App() {
       <section className="workspace">
         <header className="topbar">
           <button className="menu-button" onClick={() => setSidebarOpen(true)} type="button"><Icon name="menu" size={25} /></button>
-          <div className="brand"><span className="brand-name">Agentic RAG</span><span className="brand-description">Web, Wiki, Document</span></div>
+          <div className="brand"><span className="brand-name">Autonomous Research</span><span className="brand-description">Deep Multi-Agent Execution</span></div>
           <div className="online-status"><span className="online-dot" />Online</div>
         </header>
 
-        <main className={"chat-canvas " + (hasConversation ? "chat-canvas-conversation" : "")}>
-          {hasConversation ? (
+        <main className={"chat-canvas " + (hasConversation || job || jobEvents.length > 0 ? "chat-canvas-conversation" : "")}>
+          {hasConversation || job || jobEvents.length > 0 ? (
             <div className="conversation">
               {messages.map((message, index) => (
                 <article className={"message-row message-" + message.role} key={message.role + "-" + index}>
                   <div className="message-avatar">{message.role === "user" ? "You" : <Icon name="spark" size={16} />}</div>
-                  <div className="message-content"><div className="message-label">{message.role === "user" ? "You" : "Agentic RAG"}</div><div className="message-text">{message.content}</div></div>
+                  <div className="message-content"><div className="message-label">{message.role === "user" ? "You" : "Research Agent"}</div><div className="message-text">{message.content}</div></div>
                 </article>
               ))}
-              {job && <div className="research-progress"><span className="progress-spinner" /><span>{status || "Researching…"}</span></div>}
+
+              {(job || jobEvents.length > 0) && (
+                <LiveProgress
+                  events={jobEvents}
+                  isLive={!!job}
+                  onReportReady={finishJob}
+                />
+              )}
 
               {latestResult?.report && (
                 <article className="report-card">
                   <div className="report-card-heading">
-                    <div><div className="message-label">Latest report</div><h2>{latestResult.topic}</h2></div>
+                    <div><div className="message-label">Verified Final Report</div><h2>{latestResult.topic}</h2></div>
                     <span className="complete-pill">Complete</span>
                   </div>
                   <div className="report-body">{latestResult.report}</div>
@@ -387,23 +507,23 @@ export default function App() {
             </div>
           ) : (
             <div className="hero">
-              <div className="hero-eyebrow">Hello, Explorer!</div>
-              <h1>How Can I Help<br />You Today?</h1>
-              <p>Ask a question and I’ll research the web, Wikipedia, and your documents.</p>
+              <div className="hero-eyebrow">Multi-Agent Autonomous Research Platform</div>
+              <h1>Deep Research<br />Powered by Agents</h1>
+              <p>Autonomous agents strategize, gather web evidence from Tavily, Wikipedia & Firecrawl, cross-examine facts with an LLM critic, and generate verified reports with live WebSocket streaming.</p>
             </div>
           )}
 
           <div className="composer-wrap">
             {(status || error) && <div className={"composer-status " + (error ? "composer-error" : "")}>{error || status}</div>}
             <form className="composer" onSubmit={submitResearch}>
-              <textarea aria-label="Research question" disabled={!!job} onChange={(event) => setTopic(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submitResearch(event); } }} placeholder="Ask anything…" ref={composerRef} rows={1} value={topic} />
+              <textarea aria-label="Research question" disabled={!!job} onChange={(event) => setTopic(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submitResearch(event); } }} placeholder="Ask anything to research in-depth…" ref={composerRef} rows={1} value={topic} />
               <div className="composer-tools">
                 <label className="format-picker"><span>Format</span><select aria-label="Output format" onChange={(event) => setFormat(event.target.value)} value={format}><option value="text">Text</option><option value="json">JSON</option><option value="pdf">PDF</option></select><Icon name="chevron" size={14} /></label>
                 <button aria-label="Voice input" className="icon-button" onClick={startVoiceInput} type="button"><Icon name="mic" size={18} /></button>
                 <button aria-label="Send research question" className="send-button" disabled={!topic.trim() || !!job} type="submit"><Icon name="send" size={17} /></button>
               </div>
             </form>
-            <p className="composer-hint">Agentic RAG can make mistakes. Check important sources before acting.</p>
+            <p className="composer-hint">Autonomous Research Platform · Real-time LangGraph multi-agent execution with citation verification</p>
           </div>
         </main>
       </section>

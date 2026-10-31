@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Literal
 
 import redis.asyncio as aioredis
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +26,7 @@ from app.guardrails import validate_input, validate_output
 from app.memory import db_migrate, ltm_diff, ltm_store, session_add, session_get
 from app.output import generate_json_report, generate_pdf, get_report_diff
 from app.pool import close_pool, init_pool
+from app.streaming import emit_event, get_job_events, handle_websocket_stream
 from app.queue import (
     ack_job,
     consume_jobs,
@@ -109,6 +110,14 @@ async def _handle_job_failure(data: dict, msg_id: str, error: str) -> None:
     job_id = data["job_id"]
     attempt = int(data.get("attempt", 0))
     if attempt < config.job_max_retries:
+        await emit_event(
+            redis_client,
+            job_id,
+            "status",
+            "queued",
+            f"Research retry attempt {attempt + 1}: {error}",
+            {"error": error, "attempt": attempt + 1, "retrying": True},
+        )
         await push_job(
             redis_client,
             config,
@@ -125,6 +134,14 @@ async def _handle_job_failure(data: dict, msg_id: str, error: str) -> None:
             {"status": "retrying", "job_id": job_id, "attempt": attempt + 1, "error": error},
         )
     else:
+        await emit_event(
+            redis_client,
+            job_id,
+            "error",
+            "error",
+            f"Research failed: {error}",
+            {"error": error, "attempt": attempt, "retrying": False},
+        )
         await dead_letter(redis_client, config, data, error)
         await set_result(redis_client, config, job_id, {"status": "error", "job_id": job_id, "error": error})
     await ack_job(redis_client, config, msg_id)
@@ -140,6 +157,14 @@ async def _process_job(data: dict, msg_id: str) -> None:
     log = logging.getLogger(f"job.{job_id[:8]}")
     try:
         log.info("Starting live research job for topic: %s", topic)
+        await emit_event(
+            redis_client,
+            job_id,
+            "status",
+            "queued",
+            f"Research worker started for: '{topic}'",
+            {"topic": topic, "session_id": session_id},
+        )
         session_history = await session_get(redis_client, session_id)
 
         report_text: str | None = None
@@ -150,11 +175,19 @@ async def _process_job(data: dict, msg_id: str) -> None:
                 ok, reason = await validate_output(config, cached)
                 if ok:
                     report_text = cached
+                    await emit_event(
+                        redis_client,
+                        job_id,
+                        "status",
+                        "finalizing",
+                        "Verified cached report retrieved",
+                    )
                 else:
                     log.warning("Cached report rejected by output guardrail: %s", reason)
 
         if report_text is None:
             initial_state: ResearchState = {
+                "job_id": job_id,
                 "user_query": topic,
                 "session_id": session_id,
                 "research_plan": {},
@@ -180,6 +213,14 @@ async def _process_job(data: dict, msg_id: str) -> None:
 
             ok, reason = await validate_output(config, report_text)
             if not ok:
+                await emit_event(
+                    redis_client,
+                    job_id,
+                    "blocked",
+                    "finalizing",
+                    f"Report blocked by safety guardrails: {reason}",
+                    {"error": reason},
+                )
                 await set_result(redis_client, config, job_id, {"status": "blocked", "error": reason})
                 await ack_job(redis_client, config, msg_id)
                 return
@@ -220,6 +261,19 @@ async def _process_job(data: dict, msg_id: str) -> None:
             )
 
         await set_result(redis_client, config, job_id, result)
+        await emit_event(
+            redis_client,
+            job_id,
+            "completed",
+            "finalizing",
+            "Research successfully completed! Final report ready.",
+            {
+                "report": report_text,
+                "citations": citations,
+                "diff": diff,
+                "status": "done",
+            },
+        )
         log.info("Job completed successfully")
     except asyncio.CancelledError:
         # Leave the stream message pending so another worker can recover it.
@@ -235,7 +289,7 @@ async def lifespan(app: FastAPI):
     redis_client = aioredis.from_url(config.redis_url, decode_responses=True)
     await init_pool(config)
     await db_migrate(config)
-    graph = build_graph(config)
+    graph = build_graph(config, redis=redis_client)
     app.state.config = config
     stop_event.clear()
     if config.environment != "test" and config.start_worker:
@@ -318,6 +372,17 @@ async def start_research(request: Request, req: ResearchRequest):
 @app.get("/result/{job_id}", dependencies=[Depends(require_api_key)])
 async def get_job_result(job_id: str):
     return await get_result(redis_client, config, job_id) or {"status": "pending"}
+
+
+@app.websocket("/ws/{job_id}")
+async def websocket_research_stream(websocket: WebSocket, job_id: str):
+    await handle_websocket_stream(websocket, job_id, redis_client)
+
+
+@app.get("/events/{job_id}", dependencies=[Depends(require_api_key)])
+async def get_job_events_history(job_id: str):
+    events = await get_job_events(redis_client, job_id)
+    return {"job_id": job_id, "events": events}
 
 
 @app.get("/session/{session_id}", dependencies=[Depends(require_api_key)])
